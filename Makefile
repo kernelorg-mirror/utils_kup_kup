@@ -9,4 +9,11 @@ check:
 check-one:
 	$(PROVE) -vw -It/lib $(T)
 
-.PHONY: check check-one
+# Needs Devel::Cover; the report ends up in cover_db/coverage.html
+cover:
+	rm -rf cover_db
+	# No -j: parallel runs clobber each other's coverage data
+	KUP_TEST_COVER=1 $(PROVE) -w -It/lib t/
+	cover -report html -report text cover_db
+
+.PHONY: check check-one cover

@@ -9,6 +9,7 @@ use warnings;
 use v5.10.1;
 use parent qw(Exporter);
 use Carp qw(croak);
+use Cwd ();
 use File::Basename qw(dirname);
 use File::Spec;
 use File::Temp ();
@@ -17,7 +18,7 @@ use POSIX ();
 our @EXPORT;
 BEGIN {
 	@EXPORT = qw(tmpdir require_cmd require_mods spawn run_script
-		read_file write_file kup_env blob sign_blob kup_server
+		read_file write_file kup_env blob sign_blob kup_server perl_cmd
 		server_ok server_fails put_cmds kup_client xbail);
 	# Re-export Test::More so tests only need "use KupTest;"
 	require Test::More;
@@ -28,7 +29,7 @@ BEGIN {
 	push @EXPORT, @methods, '$TODO';
 }
 
-our $TOPDIR = File::Spec->rel2abs(dirname(__FILE__).'/../..');
+our $TOPDIR = Cwd::abs_path(dirname(__FILE__).'/../..');
 
 sub xbail (@) { BAIL_OUT(join(' ', @_)) }
 
@@ -76,7 +77,12 @@ sub require_mods (@) {
 
 # Run @$cmd with optional extra %$env (undef values delete a variable).
 # $opt->{0} is a string fed to stdin; $opt->{1} and $opt->{2} are scalar
-# refs that receive stdout and stderr.  Returns true on exit status 0.
+# refs that receive stdout and stderr.  With $opt->{-hold_stdin}, stdin is
+# a pipe that stays open until the child exits, so the child waits for
+# more input instead of seeing EOF; such a child is killed after
+# $HOLD_TIMEOUT seconds, so a server timeout that never fires fails the
+# test instead of hanging it.  Returns true on exit status 0.
+our $HOLD_TIMEOUT = 30;
 sub spawn ($;$$) {
 	my ($cmd, $env, $opt) = @_;
 	$opt //= {};
@@ -84,8 +90,13 @@ sub spawn ($;$$) {
 	for my $fd (0..2) {
 		open($fh[$fd], '+>:raw', undef) or croak "tmpfile: $!";
 	}
-	print { $fh[0] } ($opt->{0} // '');
-	seek($fh[0], 0, 0);
+	my $stdin_wr;
+	if ($opt->{-hold_stdin}) {
+		pipe($fh[0], $stdin_wr) or croak "pipe: $!";
+	} else {
+		print { $fh[0] } ($opt->{0} // '');
+		seek($fh[0], 0, 0);
+	}
 
 	my $pid = fork() // croak "fork: $!";
 	if ($pid == 0) {
@@ -94,6 +105,7 @@ sub spawn ($;$$) {
 		while (my ($k, $v) = each %{$env // {}}) {
 			defined($v) ? ($ENV{$k} = $v) : delete($ENV{$k});
 		}
+		close($stdin_wr) if $stdin_wr;
 		open(STDIN, '<&', $fh[0]) or POSIX::_exit(127);
 		open(STDOUT, '>&', $fh[1]) or POSIX::_exit(127);
 		open(STDERR, '>&', $fh[2]) or POSIX::_exit(127);
@@ -101,8 +113,21 @@ sub spawn ($;$$) {
 		{ no warnings 'exec'; exec { $cmd->[0] } @$cmd; }
 		POSIX::_exit(127);
 	}
-	waitpid($pid, 0);
+	my $killed;
+	if ($stdin_wr) {
+		# Small enough to fit the pipe buffer, so this can't block
+		print $stdin_wr ($opt->{0} // '');
+		$stdin_wr->flush;
+		alarm($HOLD_TIMEOUT);
+	}
+	local $SIG{ALRM} = sub { $killed = 1; kill('KILL', $pid) };
+	# Safe signals don't restart waitpid, so retry after the handler ran
+	1 while waitpid($pid, 0) == -1 && $!{EINTR};
+	alarm(0);
+	Test::More::diag("spawn: '@$cmd' still running after ${HOLD_TIMEOUT}s ".
+			 'with stdin held open, killed') if $killed;
 	my $status = $?;
+	close($stdin_wr) if $stdin_wr;
 	for my $fd (1, 2) {
 		next if !$opt->{$fd};
 		seek($fh[$fd], 0, 0);
@@ -115,9 +140,15 @@ sub spawn ($;$$) {
 
 # Both programs have "-T" on their #! line, so perl insists on seeing it
 # on the command line as well.
+sub perl_cmd () {
+	# -T ignores PERL5OPT, so "make cover" has to inject Devel::Cover here
+	($^X, '-T', $ENV{KUP_TEST_COVER} ?
+		("-MDevel::Cover=-db,$TOPDIR/cover_db,-silent,1") : ());
+}
+
 sub run_script ($;$$) {
 	my ($cmd, $env, $opt) = @_;
-	spawn([ $^X, '-T', @$cmd ], $env, $opt);
+	spawn([ perl_cmd(), @$cmd ], $env, $opt);
 }
 
 # Build a DATA or SIGN command with its payload
@@ -133,11 +164,12 @@ sub kup_env (@) {
 
 # Run a protocol stream through the env's server.
 # Returns ($ok, $stdout, $stderr).
-sub kup_server ($$) {
-	my ($e, $stream) = @_;
+sub kup_server ($$;$) {
+	my ($e, $stream, $opt) = @_;
 	my ($out, $err);
 	my $ok = run_script([ $e->{server} ], undef,
-				{ 0 => $stream, 1 => \$out, 2 => \$err });
+			    { %{$opt // {}},
+			      0 => $stream, 1 => \$out, 2 => \$err });
 	($ok, $out, $err);
 }
 
@@ -199,36 +231,36 @@ use strict;
 use warnings;
 use Carp qw(croak);
 
-my $CFG_TEMPLATE = <<'EOF';
-[paths]
-data_path = @DIR@/data
-git_path = @DIR@/git
-lock_file = @DIR@/lock
-tmp_path = @DIR@/tmp
-pgp_path = @DIR@/pgp
+# Written in this order; any other sections go last
+my @CFG_SECTIONS = qw(paths limits compressors gz xz);
 
-[limits]
-max_data = @MAX_DATA@
-bufsiz = 262144
-timeout_command = 30
-timeout_data = 30
-timeout_compress = 60
-timeout_compress_cpu = 60
-
-[compressors]
-use = gz, xz
-
-[gz]
-compress_command = @GZIP@ -9
-decompress_command = @GZIP@ -cd
-
-[xz]
-compress_command = @XZ@ -6
-decompress_command = @XZ@ -cd
-EOF
+sub default_cfg {
+	my ($dir) = @_;
+	my $gzip = KupTest::require_cmd('gzip');
+	my $xz = KupTest::require_cmd('xz');
+	(
+		'paths.data_path' => "$dir/data",
+		'paths.git_path'  => "$dir/git",
+		'paths.lock_file' => "$dir/lock",
+		'paths.tmp_path'  => "$dir/tmp",
+		'paths.pgp_path'  => "$dir/pgp",
+		'limits.max_data' => 8 * 1024 * 1024,
+		'limits.bufsiz'   => 262144,
+		'limits.timeout_command' => 30,
+		'limits.timeout_data' => 30,
+		'limits.timeout_compress' => 60,
+		'limits.timeout_compress_cpu' => 60,
+		'compressors.use' => 'gz, xz',
+		'gz.compress_command'   => "$gzip -9",
+		'gz.decompress_command' => "$gzip -cd",
+		'xz.compress_command'   => "$xz -6",
+		'xz.decompress_command' => "$xz -cd",
+	);
+}
 
 # %opt:
-#   max_data => bytes (default 8 MiB)
+#   cfg => { 'section.key' => value }, merged over default_cfg();
+#          an undef value removes the key
 sub new {
 	my ($class, %opt) = @_;
 	my ($dir, $guard) = KupTest::tmpdir();
@@ -248,15 +280,9 @@ sub new {
 	chmod(01777, "$dir/tmp");
 	KupTest::write_file("$dir/lock", '');
 
-	my %sub = (
-		DIR      => $dir,
-		MAX_DATA => $opt{max_data} // 8 * 1024 * 1024,
-		GZIP     => KupTest::require_cmd('gzip'),
-		XZ       => KupTest::require_cmd('xz'),
-	);
-	(my $cfg = $CFG_TEMPLATE) =~ s/\@([A-Z_]+)\@/$sub{$1}/g;
 	$self->{cfg} = "$dir/kup-server.cfg";
-	KupTest::write_file($self->{cfg}, $cfg);
+	$self->{cfg_vals} = { default_cfg($dir) };
+	$self->set_cfg(%{$opt{cfg} // {}});
 
 	# kup-server hard-codes its config path on purpose: adding an
 	# override (env or argv) would hand uploaders a way to swap in their
@@ -266,10 +292,36 @@ sub new {
 			  {my \$cfg_file = '$self->{cfg}';}mg);
 	KupTest::xbail("expected 1 \$cfg_file line in kup-server, found $n")
 		if $n != 1;
+	# Attribute errors and coverage to the real file, not this copy
+	$src =~ s{\A(.*\n)}{$1#line 2 "$KupTest::TOPDIR/kup-server"\n}
+		or KupTest::xbail('kup-server has no #! line');
 	$self->{server} = "$dir/kup-server";
 	KupTest::write_file($self->{server}, $src);
 
 	$self;
+}
+
+# Merge %vals into the server config and rewrite it
+sub set_cfg {
+	my ($self, %vals) = @_;
+	my $c = $self->{cfg_vals};
+	%$c = (%$c, %vals);
+	my %sect;
+	while (my ($k, $v) = each %$c) {
+		next if !defined $v;
+		my ($s, $key) = ($k =~ /\A([^.]+)\.(.+)\z/) or
+			croak "bad config key: $k";
+		$sect{$s}{$key} = $v;
+	}
+	my %known = map { $_ => 1 } @CFG_SECTIONS;
+	my $out = '';
+	for my $s (grep({ $sect{$_} } @CFG_SECTIONS),
+		   sort(grep { !$known{$_} } keys %sect)) {
+		$out .= "[$s]\n";
+		$out .= "$_ = $sect{$s}{$_}\n" for sort keys %{$sect{$s}};
+		$out .= "\n";
+	}
+	KupTest::write_file($self->{cfg}, $out);
 }
 
 sub gpg {

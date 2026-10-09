@@ -117,7 +117,7 @@ server_fails($e, "DATA ten %\n", qr/Bad DATA command/, 'non-numeric length');
 server_fails($e, "DATA 10\n", qr/Bad DATA command/, 'missing format');
 
 {
-	my $small = kup_env(max_data => 1024);
+	my $small = kup_env(cfg => { 'limits.max_data' => 1024 });
 	my $sfpr = $small->gen_key('alice');
 	$small->authorize($sfpr);
 	my ($ok, undef, $err) = kup_server($small, "MKDIR /t\n".

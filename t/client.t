@@ -137,7 +137,7 @@ subtest 'end to end over a fake ssh' => sub {
 	# Stands in for ssh: records its arguments, then runs the server
 	my $rsh = "$dir/fake-ssh";
 	write_file($rsh, "#!/bin/sh\nprintf '%s\\n' \"\$\@\" >$rsh.args\n".
-			 "exec $^X -T $e->{server}\n");
+			 "exec @{[ perl_cmd() ]} $e->{server}\n");
 	chmod(0755, $rsh);
 
 	my ($ok, $out, $err) = kup_client($e,
