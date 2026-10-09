@@ -29,8 +29,9 @@ Run the test suite with:
 
 The tests need gpg, git, gzip and xz in addition to the dependencies
 above. Each test builds a throwaway server tree, keyrings and git repo
-in a temporary directory, so nothing outside of it is touched. Note
-that kup-server still logs to syslog while the tests run.
+in a temporary directory, so nothing outside of it is touched. What
+kup-server logs goes to a file in that directory instead of syslog, so
+the tests can check it.
 
 To run one test with verbose output:
 

@@ -5,6 +5,7 @@
 use strict;
 use v5.10.1;
 use KupTest;
+use Digest::SHA ();
 require_mods(qw(Config::Simple BSD::Resource Git));
 
 my $e = kup_env();
@@ -32,8 +33,13 @@ server_ok($e, "MKDIR /test\n", 'create upload dir');
 {
 	my $payload = "abcd\n";
 	my $stream = put_cmds($e, $fpr, $payload, '/test/abcd.txt');
+	$e->syslog_take;
 	server_ok($e, $stream, 'plain upload');
 	is(read_file("$data/test/abcd.txt"), $payload, 'content installed');
+	# The forensic record of what was installed
+	my $sha = Digest::SHA::sha256_hex($payload);
+	like($e->syslog_take, qr{^notice: sha256: /test/abcd\.txt: $sha$}m,
+	     'sha256 of the installed file logged');
 	like(read_file("$data/test/abcd.txt.sign"),
 	     qr/\A-----BEGIN PGP SIGNATURE-----/, 'signature installed');
 	ok(!-e "$data/test/abcd.txt.gz", 'plain upload is not compressed');

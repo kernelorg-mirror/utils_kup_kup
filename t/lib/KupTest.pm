@@ -144,8 +144,9 @@ sub spawn ($;$$) {
 sub perl_cmd () {
 	# -T ignores PERL5OPT, so "make cover" has to inject Devel::Cover here
 	($^X, '-T', $ENV{KUP_TEST_COVER} ?
-		("-MDevel::Cover=-db,$TOPDIR/cover_db,-silent,1,-ignore,/Gitolite/")
-		: ());
+		("-MDevel::Cover=-db,$TOPDIR/cover_db,-silent,1,-ignore,/Gitolite/,".
+		 '-ignore,KupTestSyslog') : (),
+	 "-I$TOPDIR/t/lib", '-MKupTestSyslog');
 }
 
 # A gitolite source tree ($KUP_TEST_GITOLITE, e.g. ~/src/gitolite/src) or
@@ -179,7 +180,8 @@ sub kup_env (@) {
 sub kup_server ($$;$) {
 	my ($e, $stream, $opt) = @_;
 	my ($out, $err);
-	my $env = { %{$e->server_env}, %{$opt->{-env} // {}} };
+	my $env = { %{$e->server_env}, KUP_TEST_SYSLOG => $e->{syslog},
+		    %{$opt->{-env} // {}} };
 	my $ok = run_script([ $e->{server} ], $env,
 			    { %{$opt // {}},
 			      0 => $stream, 1 => \$out, 2 => \$err });
@@ -190,7 +192,9 @@ sub kup_server ($$;$) {
 # Returns ($ok, $stdout, $stderr).
 sub kup_client ($@) {
 	my ($e, @args) = @_;
-	my $env = { HOME => $e->{home}, KUP_HOST => 'kup.example.org' };
+	# A fake rsh may run the server, which inherits KUP_TEST_SYSLOG
+	my $env = { HOME => $e->{home}, KUP_HOST => 'kup.example.org',
+		    KUP_TEST_SYSLOG => $e->{syslog} };
 	if (ref($args[0]) eq 'HASH') {
 		my $override = shift @args;
 		%$env = (%$env, %$override);
@@ -285,6 +289,7 @@ sub new {
 		guard => $guard,
 		user  => scalar(getpwuid($<)),
 		gpg_home => "$dir/gnupg",
+		syslog => "$dir/syslog",	# see KupTestSyslog
 	}, $class;
 
 	for my $sub (qw(data git tmp pgp home gnupg)) {
@@ -362,6 +367,16 @@ sub server_env {
 	my ($self) = @_;
 	my $gl = $self->{gitolite} or return {};
 	return { %{$gl->{env}}, GL_USER => $self->{user} };
+}
+
+# Return what kup-server logged since the last call, one line per
+# message, as "level: message"
+sub syslog_take {
+	my ($self) = @_;
+	return '' if !-e $self->{syslog};
+	my $log = KupTest::read_file($self->{syslog});
+	unlink($self->{syslog}) or croak "unlink $self->{syslog}: $!";
+	$log;
 }
 
 # Merge %vals into the server config and rewrite it
