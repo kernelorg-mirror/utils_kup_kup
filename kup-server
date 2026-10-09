@@ -70,7 +70,7 @@ use Git;
 
 use Digest::SHA;
 
-my $VERSION = '0.4.0-dev';
+my $VERSION = '0.4.0';
 
 # Only the gitolite backend may use these, and only after checking them.
 # Everything else goes: gitolite's own G3T_RC, for one, names a file that

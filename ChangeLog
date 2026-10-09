@@ -1,3 +1,60 @@
+2026-10-09 Konstantin Ryabitsev <mricon@kernel.org> - 0.4.0
+	Upgrade notes:
+	* kup-server now refuses uploads signed with keys that are revoked or
+	  expired in the user's keyring, as the keyring stands at upload time,
+	  whatever time the signature claims. It used to accept both.
+	* Under gitolite, kup-server needs "[auth] backend = gitolite" in its
+	  config. Without it, kup-server refuses to run when GL_USER is set.
+	* kup now exits with a non-zero status when an upload fails. Scripts
+	  that run kup can rely on that now, and may need to.
+
+	kup-server:
+	* Add an optional gitolite auth backend ([auth] backend = gitolite):
+	  uploaders share one account, and gitolite rules for the fake repo
+	  "@kup-server" decide who may put, delete, mkdir and list what. Taint
+	  mode stays on, and only HOME, GL_USER, GL_LIBDIR and GL_BINDIR are
+	  taken from the environment, all checked. TAR and DIFF need gitolite
+	  read access to the repo they use. INFO also lists the user's rules.
+	  See "man kup-server" for details.
+	* Add Sequoia's sq as a signature verifier ([pgp] verifier = sq),
+	  reading armored certificates from <user>.asc in pgp_path. gpgv,
+	  reading <user>.gpg, stays the default.
+	* Add an optional shadow verifier ([pgp] shadow = ...) that checks
+	  every signature as well, but only logs a warning when it disagrees,
+	  for trying a verifier on real uploads before switching to it.
+	* Log the fingerprint of the key behind every good signature, and the
+	  verifier's reason for every rejected one.
+	* A verifier that cannot run properly is now a server error ("Cannot
+	  check signatures right now"), never "Signature invalid".
+	* The paths of gpgv and sq can be set in the config.
+
+	kup:
+	* Exit with the exit status of the rsh command when it fails (e.g. the
+	  server rejects a command, or ssh cannot connect), or with 1 if it
+	  was killed by a signal. kup used to exit with 0 in both cases. Write
+	  errors in --batch mode are reported too. See "EXIT STATUS" in kup(1).
+	* Report an rsh command that exits while kup is still sending data,
+	  instead of dying silently from SIGPIPE.
+
+	genrings:
+	* Also write <user>.asc for sq, from the same keys as <user>.gpg.
+	* Build the rings from scratch and rename them into place, so keys
+	  removed from the input file are removed from the rings too, and
+	  kup-server never reads a half-written ring.
+	* Stop when gpg fails.
+
+	Other changes:
+	* Add a test suite ("make check") and coverage reports ("make cover"),
+	  replacing the old test/ protocol streams. The gitolite tests run
+	  when gitolite is installed, or when KUP_TEST_GITOLITE points to the
+	  src directory of a gitolite checkout.
+	* Send questions and patches to tools@kernel.org. A .b4-config sets
+	  up "b4 send".
+	* Explain in the README how to install the Perl dependencies (patch
+	  by Willy Tarreau).
+	* Document the [auth] and [pgp] sections in kup-server(1) and in the
+	  sample config, and kup's exit status in kup(1).
+
 2017-03-28 Konstantin Ryabitsev <mricon@kernel.org> - 0.3.6
 	* Change kup-server so that separate compress/decompress commands can be
 	  specified for each compressor. This allows us to use parallelizing
