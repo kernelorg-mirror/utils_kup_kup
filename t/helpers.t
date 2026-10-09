@@ -75,13 +75,40 @@ EOF
 	is_deeply(\@fprs, [ sort($alice, $alice2) ],
 		  "alice's ring holds both her keys and nothing else");
 
-	# The real test: kup-server accepts uploads checked against it
-	rename("$dir/rings/alice.gpg", "$dir/pgp/$e->{user}.gpg") or
-		xbail("rename: $!");
-	server_ok($e, put_cmds($e, $alice2, "ok\n", '/from-genrings'),
-		  'genrings keyring works with kup-server');
-	server_fails($e, put_cmds($e, $bob, "no\n", '/from-bob'),
-		     qr/Signature invalid/, "bob can't sign as alice");
+	is_deeply([ glob("$dir/rings/.*.new") ], [], 'no temp files left');
+
+	# The real test: kup-server accepts uploads checked against them,
+	# with each verifier reading its own file
+	for my $ext (qw(gpg asc)) {
+		KupTest::write_file("$dir/pgp/$e->{user}.$ext",
+				    read_file("$dir/rings/alice.$ext"));
+	}
+	for my $v (verifiers()) {
+		$e->set_cfg('pgp.verifier' => $v);
+		server_ok($e, put_cmds($e, $alice2, "ok\n", "/from-genrings-$v"),
+			  "genrings output works with $v");
+		server_fails($e, put_cmds($e, $bob, "no\n", "/from-bob-$v"),
+			     qr/Signature invalid/, "$v: bob can't sign as alice");
+	}
+	$e->set_cfg('pgp.verifier' => undef);
+
+	# Rings are rebuilt, not added to
+	write_file("$dir/users", "alice $alice\n");
+	$run->([ "$KupTest::TOPDIR/genrings", "$dir/users", "$dir/rings" ],
+	       'genrings again, without alice-laptop');
+	for my $ext (qw(gpg asc)) {
+		my $ring = "$dir/rings/alice.$ext";
+		$out = '';
+		# The .gpg file is a keybox, which --import can't read
+		$e->gpg([ '--with-colons', $ext eq 'gpg' ?
+			  ('--no-default-keyring', '--keyring', $ring,
+			   '--list-keys') :
+			  ('--import-options', 'show-only', '--import', $ring) ],
+			{ 1 => \$out });
+		@fprs = ($out =~ /^fpr:(?:[^:]*:){8}([0-9A-F]+):/mg);
+		is_deeply([ grep { $_ eq $alice || $_ eq $alice2 } @fprs ],
+			  [ $alice ], "alice.$ext lost the dropped key");
+	}
 };
 
 subtest 'gpg-sign-all' => sub {

@@ -13,7 +13,8 @@
 
 #
 # Take a text file and an single gpg ring and separate out
-# authorized key rings into separate files.
+# authorized key rings into separate files: <user>.gpg for gpgv and
+# <user>.asc (armored certificates) for sq.
 #
 # The format of the input file is:
 # username key_id other_fields
@@ -106,9 +107,27 @@ foreach my $username (keys(%keys)) {
     for (my $i = 1; $i <= $n; $i++) {
 	push(@i, "${tmpdir}/${username}.${i}.key");
     }
+
+    # Build each ring from scratch, so keys dropped from the input file
+    # are dropped from the ring too, and rename it into place, so
+    # kup-server never sees a half-written one
+    my $ring = "${outdir}/.${username}.gpg.new";
+    my $asc  = "${outdir}/.${username}.asc.new";
+    unlink($ring, "${ring}~", $asc);
     system($gpg, '--homedir', $tmpdir,
 	   '--no-default-keyring',
-	   '--primary-keyring', "${outdir}/${username}.gpg",
-	   '--import', @i);
-    unlink("${outdir}/${username}.gpg~");
+	   '--primary-keyring', $ring,
+	   '--import', @i) == 0
+	or die "$0: importing keys for $username failed\n";
+    # sq reads armored certificates; export them from the same ring, so
+    # both files always hold the same keys
+    system($gpg, '--homedir', $tmpdir,
+	   '--no-default-keyring', '--keyring', $ring,
+	   '--armor', '--output', $asc, '--export') == 0
+	or die "$0: exporting keys for $username failed\n";
+    unlink("${ring}~");
+    rename($ring, "${outdir}/${username}.gpg")
+	or die "$0: cannot install ${username}.gpg: $!\n";
+    rename($asc, "${outdir}/${username}.asc")
+	or die "$0: cannot install ${username}.asc: $!\n";
 }
