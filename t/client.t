@@ -130,6 +130,102 @@ subtest 'host configuration' => sub {
 	ok($ok, '--batch without a host');
 };
 
+# Stands in for ssh: records its arguments and the stream it was sent
+my $rec = "$dir/rec-ssh";
+write_file($rec, "#!/bin/sh\nprintf '%s\\n' \"\$\@\" >$rec.args\n".
+		 "cat >$rec.stdin\n");
+chmod(0755, $rec);
+my $via_rec = sub {
+	my ($env, @args) = @_;
+	unlink("$rec.args", "$rec.stdin");
+	my ($ok, $out, $err) = kup_client($e, $env, @args);
+	ok($ok, "kup @args") or diag("stderr: $err");
+	(-e "$rec.args" ? read_file("$rec.args") : undef, $err);
+};
+
+subtest 'global options' => sub {
+	my $no_env = { KUP_HOST => undef };
+	for my $o ([qw(-o cli.example.org)], ['--host=cli.example.org'],
+		   [qw(--host cli.example.org)]) {
+		my ($args) = $via_rec->({ KUP_RSH => $rec }, @$o, 'info');
+		is($args, "cli.example.org\n", "@$o overrides KUP_HOST");
+	}
+	for my $o ([ '-e', $rec ], [ "--rsh=$rec" ], [ '--ssh', $rec ]) {
+		my ($args) = $via_rec->($no_env, @$o, qw(-o h info));
+		is($args, "h\n", "@$o sets the rsh command");
+	}
+	for my $o ([qw(-c gl-kup)], ['--subcmd=gl-kup']) {
+		my ($args) = $via_rec->({ KUP_RSH => $rec }, @$o, 'info');
+		is($args, "kup.example.org\ngl-kup\n", "@$o sets the subcmd");
+	}
+	is(read_file("$rec.stdin"), "INFO\n", 'stream reached the rsh');
+
+	write_file("$e->{home}/.kuprc",
+		   "host = rc.example.org\nrsh = $rec\nsubcmd = rc-sub\n");
+	my ($args) = $via_rec->($no_env, 'info');
+	is($args, "rc.example.org\nrc-sub\n", 'host, rsh, subcmd from .kuprc');
+	($args) = $via_rec->({ KUP_SUBCMD => 'env-sub' }, 'info');
+	is($args, "kup.example.org\nenv-sub\n",
+	   'KUP_HOST and KUP_SUBCMD override .kuprc');
+	unlink("$e->{home}/.kuprc");
+
+	(undef, my $err) = $via_rec->({ KUP_RSH => $rec }, qw(-v mkdir /a));
+	is($err, "MKDIR /a\n", '-v echoes commands to stderr');
+
+	my ($ok, $out, $usage) = kup_client($e, '-h');
+	ok($ok && $usage =~ /\AUsage: .*^Commands:/ms, '-h shows usage');
+
+	($ok, undef, $err) = kup_client($e, { KUP_RSH => "$rec;id" }, 'info');
+	ok(!$ok && $err =~ /suspicious KUP_RSH/, 'shell metachar in rsh');
+};
+
+subtest 'usage errors' => sub {
+	for my $args ([], [qw(put a.txt)], [qw(put a.txt a.txt.sign)],
+		      [qw(put --tar /p.git)], [qw(put --diff /p.git v1)],
+		      ['mkdir'], ['rm'], [qw(mv /a)]) {
+		my ($ok, $out, $err) = kup_client($e, '-b', @$args);
+		ok(!$ok && $? >> 8 == 1 && $err =~ /\AUsage:/,
+		   "usage for: kup @$args") or diag($err);
+	}
+	$client_fails->(qr/unknown option to put command: --frob/,
+			'unknown put option', qw(put --frob x y /z));
+	$client_fails->(qr/not a plain file: \./, 'put of a directory',
+			qw(put . a.txt.sign /x));
+	$client_fails->(qr/invalid path name for git tree/,
+			'put --diff of a non-.git tree',
+			qw(put --diff /p v1 v2 a.txt.sign /x.gz));
+	$client_fails->(qr/invalid ref: v\x01/, 'control char in TAR ref',
+			'put', '--tar', '/p.git', "v\x01", 'a.txt.sign', '/x');
+	for my $i (0, 1) {
+		my @refs = ('v1', 'v2');
+		$refs[$i] = "v\x01";
+		$client_fails->(qr/invalid ref: v\x01/,
+				"control char in DIFF ref ".($i + 1),
+				'put', '--diff', '/p.git', @refs,
+				'a.txt.sign', '/x');
+	}
+	for my $args ([qw(rm /.x)], [qw(mv /.x /y)], [qw(mv /y /.x)],
+		      [qw(ls /.x)]) {
+		$client_fails->(qr/invalid pathname: \/\.x/,
+				"invalid path: kup @$args", @$args);
+	}
+};
+
+subtest 'aliases and encoding' => sub {
+	for my $t ([[qw(del /a)], "DELETE /a\n"],
+		   [[qw(delete /a)], "DELETE /a\n"],
+		   [[qw(link /a /b)], "LINK /a /b\n"],
+		   [[qw(dir /a)], "DIR /a/\n"],
+		   [[qw(MKDIR /a)], "MKDIR /a\n"]) {
+		is($batch->(@{$t->[0]}), $t->[1], "kup @{$t->[0]}");
+	}
+	write_file("$dir/r.tar.bz2", 'BZ');
+	like($batch->(qw(put r.tar.bz2 a.txt.sign /r.tar.bz2)),
+	     qr/\ADATA 2 bz2\n.*^PUT \/r\.tar\.gz\n\z/ms, 'bz2 upload');
+	like($batch->('put', 'a.txt', 'a.txt.sign', "/caf\xc3\xa9%"),
+	     qr/^PUT \/caf%C3%A9%25\n\z/m, 'non-ASCII and % are %-encoded');
+};
+
 subtest 'end to end over a fake ssh' => sub {
 	my $fpr = $e->gen_key('alice');
 	$e->authorize($fpr);
@@ -149,6 +245,16 @@ subtest 'end to end over a fake ssh' => sub {
 	is(read_file("$e->{dir}/data/pub/a.txt"), "abcd\n", 'file uploaded');
 	like($out, qr/^\+\+\+ \/pub\/\n.* a\.txt\n.* a\.txt\.sign\n\n\z/sm,
 	     'ls output came back');
+
+	# Release scripts do "kup put ... && announce", so failures must
+	# show up in the exit status
+	local $TODO = 'close_output() ignores the rsh exit status';
+	write_file("$dir/bad.sign", sign_blob($e, $fpr, "not abcd\n"));
+	($ok, undef, $err) = kup_client($e, { KUP_RSH => $rsh },
+					qw(put a.txt bad.sign /pub/bad));
+	ok(!$ok, 'server-side failure makes kup fail') or diag($err);
+	($ok) = kup_client($e, { KUP_RSH => "$dir/no-such-ssh" }, 'info');
+	ok(!$ok, 'missing rsh command makes kup fail');
 };
 
 done_testing;

@@ -67,6 +67,9 @@ for my $t (['nosuchref', 'unknown ref'],
 		     qr/Invalid tree reference/, "TAR rejects $t->[1]");
 	server_fails($e, "DIFF /proj.git v1 $t->[0]\n",
 		     qr/Invalid tree reference/, "DIFF rejects $t->[1]");
+	server_fails($e, "DIFF /proj.git $t->[0] v1\n",
+		     qr/Invalid tree reference/,
+		     "DIFF rejects $t->[1] as the first ref");
 }
 
 for my $t (['/nope.git', 'missing repo'],
@@ -78,6 +81,8 @@ for my $t (['/nope.git', 'missing repo'],
 }
 server_fails($e, "TAR /../git/proj.git v1 p/\n",
 	     qr/Invalid pathname in TAR command/, 'TAR path escape');
+server_fails($e, "DIFF /../git/proj.git v1 v2\n",
+	     qr/Invalid pathname in DIFF command/, 'DIFF path escape');
 server_fails($e, "TAR /proj.git v1\n", qr/Bad TAR command/,
 	     'TAR without a prefix');
 server_fails($e, "DIFF /proj.git v1\n", qr/Bad DIFF command/,

@@ -129,6 +129,103 @@ subtest DIR => sub {
 		     qr/Invalid directory in DIR command/, 'DIR of a file');
 };
 
+subtest 'conflicts and rollback' => sub {
+	my $e_dir = "$data/e";
+	server_ok($e, "MKDIR /e\nMKDIR /e/sub\nMKDIR /e/d\n".
+		  put_cmds($e, $fpr, "ppp\n", '/e/p.txt').
+		  put_cmds($e, $fpr, "qqq\n", '/e/q.txt').
+		  put_cmds($e, $fpr, "ggg\n", '/e/g.gz'),
+		  'seed /e');
+
+	server_fails($e, "MKDIR /e/p.txt/x\n", qr/Problem creating/,
+		     'MKDIR below a file');
+	server_fails($e, put_cmds($e, $fpr, 'x', '/e/nodir/f'),
+		     qr/Failed to install files/, 'PUT into a missing dir');
+	server_fails($e, "MOVE /e/p.txt /e/g\n",
+		     qr/Filename conflict \(compressed and uncompressed\)/,
+		     'MOVE plain file onto the stem of a .gz group');
+	server_fails($e, "MOVE /e/p.txt /e/sub\n",
+		     qr/Trying to overwrite a non-file/,
+		     'MOVE file onto a directory');
+	server_fails($e, "MOVE /e/d /e/nodir/d\n",
+		     qr/MOVE of directory failed/,
+		     'MOVE directory into a missing parent');
+	server_fails($e, "LINK /e/p.txt /e/q.txt\n",
+		     qr/LINK of plain file failed/, 'LINK onto an existing file');
+	is(read_file("$e_dir/q.txt"), "qqq\n", 'existing file untouched');
+
+	# A stray file makes one link of the group fail part-way through
+	write_file("$e_dir/h.xz", 'stray');
+	server_fails($e, "LINK /e/g.gz /e/h.gz\n",
+		     qr/LINK of compressed file failed/,
+		     'LINK of a group onto a partly taken name');
+	ok(!-e "$e_dir/h.sign" && !-e "$e_dir/h.gz",
+	   'links made before the failure were rolled back');
+	is(read_file("$e_dir/h.xz"), 'stray', 'stray file untouched');
+
+	# Same for MOVE, by removing one group member behind kup's back
+	rename("$e_dir/g.xz", "$e_dir/g.xz.away") or xbail("rename: $!");
+	server_fails($e, "MOVE /e/g.gz /e/k.gz\n",
+		     qr/MOVE of compressed file failed/,
+		     'MOVE of an incomplete group');
+	ok(-f "$e_dir/g.gz" && -f "$e_dir/g.sign" && !glob("$e_dir/k.*"),
+	   'renames made before the failure were rolled back');
+
+	server_fails($e, "DELETE /e/g.gz\n",
+		     qr/DELETE of compressed file failed/,
+		     'DELETE of an incomplete group');
+	{
+		# Checking for "no half group" instead would pass or fail
+		# depending on Perl's random hash order of the extensions
+		local $TODO = 'DELETE has no rollback';
+		ok(-f "$e_dir/g.gz" && -f "$e_dir/g.sign",
+		   'a failed DELETE changes nothing');
+	}
+	rename("$e_dir/g.xz.away", "$e_dir/g.xz") or xbail("rename: $!");
+
+	require POSIX;
+	POSIX::mkfifo("$e_dir/fifo", 0600) or xbail("mkfifo: $!");
+	for my $cmd ('MOVE /e/fifo /e/fifo2', 'DELETE /e/fifo') {
+		my ($verb) = ($cmd =~ /\A(\w+)/);
+		server_fails($e, "$cmd\n",
+			     qr/$verb of non-directory\/non-file not currently/,
+			     "$verb of a fifo");
+	}
+
+	mkdir("$e_dir/s.txt.sign") or xbail("mkdir: $!");
+	write_file("$e_dir/s.txt", 's');
+	server_fails($e, "DELETE /e/s.txt\n",
+		     qr/DELETE encountered files and non-files/,
+		     'DELETE when a group member is a directory');
+	ok(-f "$e_dir/s.txt", 'nothing deleted');
+
+	symlink('p.txt', "$e_dir/link") or xbail("symlink: $!");
+	write_file("$e_dir/caf\xc3\xa9", '');
+	my %mode = map { (split(/ /))[-1] => substr($_, 0, 1) }
+		grep(/\S/, split(/\n/, server_ok($e, "DIR /e\n", 'DIR /e')));
+	is($mode{sub}, 'd', 'directory listed with d');
+	is($mode{link}, 'l', 'symlink listed with l');
+	is($mode{fifo}, '?', 'fifo listed as ??????????');
+	ok(exists $mode{'caf%C3%A9'}, 'non-ASCII name URL-encoded');
+};
+
+subtest 'argument checks' => sub {
+	for my $t (['PUT', 'Bad PUT command'],
+		   ['PUT /a /b', 'Bad PUT command'],
+		   ['MKDIR', 'Bad MKDIR command'],
+		   ['LINK /a', 'Bad LINK command'],
+		   ['DELETE', 'Bad DELETE command'],
+		   ['DIR /a /b', 'Bad DIR command'],
+		   ['MOVE /.x /y', 'Invalid filename in MOVE command'],
+		   ['DELETE /.x', 'Invalid pathname in DELETE command'],
+		   ['DIR /.x', 'Invalid pathname in DIR command']) {
+		server_fails($e, "$t->[0]\n", qr/\Q$t->[1]\E/, $t->[0]);
+	}
+	# Only checked after the signature, so it needs a real upload
+	server_fails($e, put_cmds($e, $fpr, 'x', '/.x'),
+		     qr/Invalid filename in PUT command/, 'PUT /.x');
+};
+
 subtest protocol => sub {
 	is(server_ok($e, "INFO\n", 'INFO'), "kup-server 0.3.6\n",
 	   'INFO prints the version');
