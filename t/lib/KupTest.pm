@@ -19,7 +19,8 @@ our @EXPORT;
 BEGIN {
 	@EXPORT = qw(tmpdir require_cmd require_mods spawn run_script
 		read_file write_file kup_env blob sign_blob kup_server perl_cmd
-		server_ok server_fails put_cmds kup_client xbail);
+		server_ok server_fails put_cmds kup_client xbail
+		require_gitolite);
 	# Re-export Test::More so tests only need "use KupTest;"
 	require Test::More;
 	my @methods = grep(!/\W/, @Test::More::EXPORT);
@@ -143,7 +144,17 @@ sub spawn ($;$$) {
 sub perl_cmd () {
 	# -T ignores PERL5OPT, so "make cover" has to inject Devel::Cover here
 	($^X, '-T', $ENV{KUP_TEST_COVER} ?
-		("-MDevel::Cover=-db,$TOPDIR/cover_db,-silent,1") : ());
+		("-MDevel::Cover=-db,$TOPDIR/cover_db,-silent,1,-ignore,/Gitolite/")
+		: ());
+}
+
+# A gitolite source tree ($KUP_TEST_GITOLITE, e.g. ~/src/gitolite/src) or
+# an installed gitolite.  Returns the path to the gitolite command.
+sub require_gitolite () {
+	my $gl = $ENV{KUP_TEST_GITOLITE};
+	return "$gl/gitolite" if defined($gl) && -x "$gl/gitolite";
+	which('gitolite') // Test::More::plan(skip_all =>
+		"gitolite missing for $0 (set KUP_TEST_GITOLITE to a source tree)");
 }
 
 sub run_script ($;$$) {
@@ -162,12 +173,14 @@ sub kup_env (@) {
 	KupTest::Env->new(@_);
 }
 
-# Run a protocol stream through the env's server.
+# Run a protocol stream through the env's server, as $e->{user}.
+# $opt->{-env} is merged over the env the server would normally get.
 # Returns ($ok, $stdout, $stderr).
 sub kup_server ($$;$) {
 	my ($e, $stream, $opt) = @_;
 	my ($out, $err);
-	my $ok = run_script([ $e->{server} ], undef,
+	my $env = { %{$e->server_env}, %{$opt->{-env} // {}} };
+	my $ok = run_script([ $e->{server} ], $env,
 			    { %{$opt // {}},
 			      0 => $stream, 1 => \$out, 2 => \$err });
 	($ok, $out, $err);
@@ -261,6 +274,9 @@ sub default_cfg {
 # %opt:
 #   cfg => { 'section.key' => value }, merged over default_cfg();
 #          an undef value removes the key
+#   gitolite => 1: use the gitolite auth backend with a fresh gitolite
+#          instance; its repositories are the git_path, and $e->{user}
+#          becomes GL_USER
 sub new {
 	my ($class, %opt) = @_;
 	my ($dir, $guard) = KupTest::tmpdir();
@@ -282,6 +298,7 @@ sub new {
 
 	$self->{cfg} = "$dir/kup-server.cfg";
 	$self->{cfg_vals} = { default_cfg($dir) };
+	$self->gitolite_setup if $opt{gitolite};
 	$self->set_cfg(%{$opt{cfg} // {}});
 
 	# kup-server hard-codes its config path on purpose: adding an
@@ -299,6 +316,52 @@ sub new {
 	KupTest::write_file($self->{server}, $src);
 
 	$self;
+}
+
+sub gitolite_setup {
+	my ($self) = @_;
+	my $gitolite = KupTest::require_gitolite();
+	my $home = "$self->{dir}/gitolite";
+	mkdir($home) or croak "mkdir $home: $!";
+	my %env = (HOME => $home, GIT_CONFIG_NOSYSTEM => 1,
+		   GIT_CONFIG_GLOBAL => '/dev/null');
+	my $run = sub {
+		my ($out, $err);
+		KupTest::spawn([ $gitolite, @_ ], \%env,
+			       { 1 => \$out, 2 => \$err })
+			or KupTest::xbail("gitolite @_ failed: $err");
+		$out;
+	};
+	$run->(qw(setup -a admin));
+	my ($bindir, $libdir) = map {
+		my $v = $run->('query-rc', $_);
+		chomp($v);
+		$v;
+	} qw(GL_BINDIR GL_LIBDIR);
+	$self->{gitolite} = {
+		run => $run,
+		env => { HOME => $home, GL_BINDIR => $bindir,
+			 GL_LIBDIR => $libdir },
+	};
+	$self->{git} = "$home/repositories";
+	$self->{cfg_vals}{'paths.git_path'} = $self->{git};
+	$self->{cfg_vals}{'auth.backend'} = 'gitolite';
+}
+
+# Replace the gitolite rules (other than gitolite-admin's) and compile them
+sub gitolite_conf {
+	my ($self, $rules) = @_;
+	my $gl = $self->{gitolite} or croak 'not a gitolite env';
+	KupTest::write_file("$gl->{env}{HOME}/.gitolite/conf/gitolite.conf",
+			    "repo gitolite-admin\n    RW+ = admin\n\n$rules");
+	$gl->{run}->('compile');
+}
+
+# What the server finds in its environment, apart from PATH and the like
+sub server_env {
+	my ($self) = @_;
+	my $gl = $self->{gitolite} or return {};
+	return { %{$gl->{env}}, GL_USER => $self->{user} };
 }
 
 # Merge %vals into the server config and rewrite it
@@ -365,7 +428,7 @@ sub git_repo {
 	my ($self, $name) = @_;
 	KupTest::require_cmd('git');
 	my $work = "$self->{dir}/work-$name";
-	my $bare = "$self->{dir}/git/$name.git";
+	my $bare = "$self->{git}/$name.git";
 	# Pin everything that could make the archive differ between runs
 	my $env = {
 		GIT_CONFIG_NOSYSTEM => 1,
