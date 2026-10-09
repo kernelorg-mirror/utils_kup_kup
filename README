@@ -38,4 +38,9 @@ To run one test with verbose output:
 
 SUPPORT
 -------
-Kup is on github: https://github.com/mricon/kup
+
+Please send questions, bug reports and patches to tools@kernel.org.
+The list archive is at https://lore.kernel.org/tools/.
+
+The easiest way to send patches is with b4. This repository has a
+.b4-config, so "b4 send" already knows where patches should go.
