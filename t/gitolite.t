@@ -194,9 +194,15 @@ subtest environment => sub {
 	# The sig-note-to-kup cron job calls kup-server directly, without
 	# GL_BINDIR.  Gitolite::Rc puts that in front of PATH anyway, which
 	# taint mode refuses on the first exec, so a DIR alone proves nothing
-	my ($ok, undef, $err) = kup_server($e, $put->(alice => '/testing/nobindir'),
-					   { -env => { GL_BINDIR => undef } });
-	ok($ok, 'GL_BINDIR is optional, even for a PUT') or diag("stderr: $err");
+	for my $v (verifiers()) {
+		$e->set_cfg('pgp.verifier' => $v);
+		my ($ok, undef, $err) = kup_server($e,
+			$put->(alice => "/testing/nobindir-$v"),
+			{ -env => { GL_BINDIR => undef } });
+		ok($ok, "GL_BINDIR is optional, even for a PUT checked by $v")
+			or diag("stderr: $err");
+	}
+	$e->set_cfg('pgp.verifier' => undef);
 
 	# Gitolite::Rc runs the file named in G3T_RC
 	my $evil = "$e->{dir}/evil.rc";

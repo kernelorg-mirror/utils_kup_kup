@@ -73,8 +73,10 @@ be on the same filesystem as \fBdata_path\fP, since the script expects tocreate 
 .RE
 .TP
 \fBpgp_path\fP = \fI/var/lib/kup/pgp\fP
-A directory containing a GnuPG public keyring for each user, named
-<user>.gpg and readable (but not writable) by that user.
+A directory with the keys each user may sign uploads with, readable (but
+not writable) by that user: a GnuPG keyring named <user>.gpg for
+\fBgpgv\fP, and armored certificates named <user>.asc for \fBsq\fP.
+Each verifier only reads its own file.
 .PP
 .TP
 \fB[auth]\fP
@@ -92,6 +94,28 @@ With \fIunix\fP,
 refuses to run when \fBGL_USER\fP is set. This catches a gitolite
 setup with this line missing, where all users would share one Unix
 account and nothing would control their access.
+.PP
+.TP
+\fB[pgp]\fP
+Which program checks upload signatures. This section is optional.
+.TP
+\fBverifier\fP = \fIgpgv\fP
+Either \fIgpgv\fP (the default) or \fIsq\fP (Sequoia). Only this one
+decides whether a signature is good. If it cannot run properly, uploads
+fail with a server error, never with "Signature invalid".
+.TP
+\fBshadow\fP = \fIsq\fP
+Optional. A second verifier that checks every signature too, but never
+decides anything: when its result differs from the verifier's, a
+warning is logged. Use it to try a new verifier, or a new set of
+keyrings, before switching to it. If it fails to run, that is only
+logged.
+.TP
+\fBgpgv\fP = \fI/usr/bin/gpgv\fP, \fBsq\fP = \fI/usr/bin/sq\fP
+Absolute paths of the programs.
+.PP
+The fingerprint of the key behind every good signature is logged, and
+so is the reason for every rejected one.
 .PP
 .TP
 \fB[limits]\fP

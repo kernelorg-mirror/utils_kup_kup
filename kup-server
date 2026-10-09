@@ -187,6 +187,36 @@ my $lock_file = $cfg->param('paths.lock_file');
 my $tmp_path  = $cfg->param('paths.tmp_path');
 my $pgp_path  = $cfg->param('paths.pgp_path');
 
+# Signatures are checked by the "verifier": gpgv with a <user>.gpg keyring
+# in pgp_path, or sq with <user>.asc certificates.  An optional "shadow"
+# verifier checks them too, but only logs when it disagrees; it is for
+# moving from one verifier to the other.
+my %pgp_program = ('gpgv' => '/usr/bin/gpgv', 'sq' => '/usr/bin/sq');
+
+sub pgp_program($) {
+	my($v) = @_;
+
+	if (!exists($pgp_program{$v})) {
+		fatal("Unknown PGP verifier: $v");
+	}
+	my $prog = $cfg->param("pgp.$v") // $pgp_program{$v};
+	# It is run without a shell, so it can't rely on PATH
+	if ($prog !~ m:^(/[^\0]*)\z:) {
+		fatal("pgp.$v must be an absolute path");
+	}
+	return $1;
+}
+
+my $pgp_verifier = $cfg->param('pgp.verifier') // 'gpgv';
+my $pgp_shadow   = $cfg->param('pgp.shadow') // '';
+$pgp_program{$pgp_verifier} = pgp_program($pgp_verifier);
+if ($pgp_shadow ne '') {
+	if ($pgp_shadow eq $pgp_verifier) {
+		fatal("pgp.shadow must differ from pgp.verifier");
+	}
+	$pgp_program{$pgp_shadow} = pgp_program($pgp_shadow);
+}
+
 my $max_data = int($cfg->param('limits.max_data'));
 my $bufsiz   = int($cfg->param('limits.bufsiz'));
 
@@ -901,38 +931,116 @@ sub cleanup()
 	$have_sign = 0;
 }
 
+# Exit codes that mean the verifier did its job; any other result means
+# it is broken (sq exits with 2 when it doesn't know an option, say), and
+# that must never look like a bad signature
+my %pgp_exit_ok = ('gpgv' => { 0 => 1, 1 => 1, 2 => 1 },
+		   'sq'   => { 0 => 1, 1 => 1 });
+
+# Read at most 64 KiB of a file; what the verifiers say about one signature
+# is far smaller, and anything more would only be logged truncated anyway
+sub read_small_file($)
+{
+	my($file) = @_;
+	my $fh;
+	open($fh, '<', $file) or return '';
+	my $s = '';
+	read($fh, $s, 65536);
+	close($fh);
+	return $s;
+}
+
+# Check the session's signature with verifier $v.  Returns 1 and the
+# signer's fingerprint(s) for a good signature, 0 and the verifier's
+# reason for a bad one, and an empty list if the verifier didn't run
+# properly (that is logged).
+sub run_verifier($)
+{
+	my($v) = @_;
+	my @cmd;
+
+	if ($v eq 'gpgv') {
+		@cmd = ($pgp_program{$v}, '--quiet', '--homedir', $tmpdir,
+				'--status-fd', '1',
+				'--keyring', $pgp_path."/${user_name}.gpg",
+				$tmpdir.'/data.sign', $tmpdir.'/data');
+	} elsif ($v eq 'sq') {
+		# --home=none: no certificate store, no web of trust, nothing
+		# from the account's home directory
+		@cmd = ($pgp_program{$v}, '--home=none', 'verify',
+				'--signer-file', $pgp_path."/${user_name}.asc",
+				'--signature-file', $tmpdir.'/data.sign', $tmpdir.'/data');
+	} else {
+		fatal("Unknown PGP verifier: $v");
+	}
+
+	my $out = $tmpdir.'/verify.out';
+	my $err = $tmpdir.'/verify.err';
+	my $pid = fork();
+	if (!defined($pid)) {
+		fatal("Fork failed");
+	} elsif ($pid == 0) {
+		open(STDIN, '<', '/dev/null') or POSIX::_exit(127);
+		open(STDOUT, '>', $out) or POSIX::_exit(127);
+		open(STDERR, '>', $err) or POSIX::_exit(127);
+		{ no warnings 'exec'; exec {$cmd[0]} @cmd; }
+		POSIX::_exit(127);
+	}
+	waitpid($pid, 0);
+	my $status = $?;
+	my $stdout = read_small_file($out);
+	my $stderr = read_small_file($err);
+	unlink($out, $err);
+
+	# One line for syslog
+	$stderr =~ s/\s+/ /g;
+	$stderr =~ s/^ | $//g;
+	$stderr = substr($stderr, 0, 500);
+
+	# gpgv also exits with 2 when it can't run at all (a bad option, say),
+	# but then it hasn't printed any status line.  The one rejection that
+	# doesn't print one either is an inline-signed message sent as SIGN.
+	if (($status & 127) || !$pgp_exit_ok{$v}{$status >> 8} ||
+		($v eq 'gpgv' && $status != 0 && $stdout !~ /^\[GNUPG:\] /m &&
+		 $stderr !~ /not a detached signature/)) {
+		syslog(LOG_ERR, "pgp: %s failed: %s: %s", $v,
+			   ($status & 127) ? 'signal '.($status & 127)
+							   : 'exit status '.($status >> 8),
+			   $stderr);
+		return ();
+	}
+	return (0, $stderr) if ($status != 0);
+
+	my @fpr = ($v eq 'gpgv')
+		? ($stdout =~ /^\[GNUPG:\] VALIDSIG (?:\S+ ){9}([0-9A-F]+)$/mg)
+		: ($stderr =~ /signature made by ([0-9A-F]+)/g);
+	return (1, join(',', @fpr) || 'unknown');
+}
+
 sub signature_valid()
 {
-	my $oldstdout;
-	my $oldstderr;
-	my $devnull;
+	my($ok, $info) = run_verifier($pgp_verifier);
+	if (!defined($ok)) {
+		fatal("Cannot check signatures right now, please report this");
+	}
 
-	# gpg(v) likes to chat on the console no matter what...
-	open($devnull, '>', '/dev/null')
-		or fatal("Cannot open /dev/null");
-	open($oldstdout, '>&', \*STDOUT)
-		or fatal("dup error");
-	open($oldstderr, '>&', \*STDERR)
-		or fatal("dup error");
-	open(STDOUT, '>&', $devnull)
-		or fatal("dup error");
-	open(STDERR, '>&', $devnull)
-		or fatal("dup error");
-	close($devnull);
+	if ($pgp_shadow ne '') {
+		my($shadow_ok, $shadow_info) = run_verifier($pgp_shadow);
+		if (defined($shadow_ok) && $shadow_ok != $ok) {
+			syslog(LOG_WARNING, "pgp: %s %s, but shadow %s %s: %s",
+				   $pgp_verifier, $ok ? 'accepted' : 'rejected',
+				   $pgp_shadow, $shadow_ok ? 'accepted' : 'rejected',
+				   $ok ? $shadow_info : $info);
+		}
+	}
 
-	my $status =
-		system('/usr/bin/gpgv',
-			   '--quiet',
-			   '--homedir', $tmpdir,
-			   '--keyring', $pgp_path."/${user_name}.gpg",
-			   $tmpdir.'/data.sign', $tmpdir.'/data');
-
-	open(STDOUT, '>&', $oldstdout);
-	close($oldstdout);
-	open(STDERR, '>&', $oldstderr);
-	close($oldstderr);
-
-	return $status == 0;
+	if ($ok) {
+		syslog(LOG_NOTICE, "pgp: signed by %s", $info);
+	} else {
+		syslog(LOG_NOTICE, "pgp: %s rejected the signature: %s",
+			   $pgp_verifier, $info);
+	}
+	return $ok;
 }
 
 # Return true if the filename has one of the extensions in the list

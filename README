@@ -20,6 +20,9 @@ them, then your distro likely has the "cpan" tool to install them :
 
   $ sudo cpan install Config::Simple Encode File::Spec
 
+kup-server checks signatures with gpgv (from GnuPG) or, if configured, sq
+(from Sequoia-PGP).
+
 TESTING
 -------
 

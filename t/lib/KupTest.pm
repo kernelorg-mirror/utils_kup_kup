@@ -20,7 +20,7 @@ BEGIN {
 	@EXPORT = qw(tmpdir require_cmd require_mods spawn run_script
 		read_file write_file kup_env blob sign_blob kup_server perl_cmd
 		server_ok server_fails put_cmds kup_client xbail
-		require_gitolite);
+		require_gitolite verifiers);
 	# Re-export Test::More so tests only need "use KupTest;"
 	require Test::More;
 	my @methods = grep(!/\W/, @Test::More::EXPORT);
@@ -158,6 +158,11 @@ sub require_gitolite () {
 		"gitolite missing for $0 (set KUP_TEST_GITOLITE to a source tree)");
 }
 
+# The PGP verifiers kup-server supports that are installed here
+sub verifiers () {
+	grep { which($_) } qw(gpgv sq);
+}
+
 sub run_script ($;$$) {
 	my ($cmd, $env, $opt) = @_;
 	spawn([ perl_cmd(), @$cmd ], $env, $opt);
@@ -272,6 +277,7 @@ sub default_cfg {
 		'gz.decompress_command' => "$gzip -cd",
 		'xz.compress_command'   => "$xz -6",
 		'xz.decompress_command' => "$xz -cd",
+		map { ("pgp.$_" => KupTest::which($_)) } KupTest::verifiers(),
 	);
 }
 
@@ -428,13 +434,17 @@ sub gen_key {
 	$fpr;
 }
 
-# Make @fprs the only keys allowed to sign uploads for the current user
+# Make @fprs the only keys allowed to sign uploads for the current user:
+# <user>.gpg for gpgv and <user>.asc for sq, with the same keys
 sub authorize {
 	my ($self, @fprs) = @_;
-	my ($ring, $err);
-	$self->gpg([ '--export', @fprs ], { 1 => \$ring, 2 => \$err })
-		or KupTest::xbail("gpg export failed: $err");
-	KupTest::write_file("$self->{dir}/pgp/$self->{user}.gpg", $ring);
+	for my $ext ('gpg', 'asc') {
+		my ($ring, $err);
+		$self->gpg([ '--export', ($ext eq 'asc' ? '--armor' : ()), @fprs ],
+			   { 1 => \$ring, 2 => \$err })
+			or KupTest::xbail("gpg export failed: $err");
+		KupTest::write_file("$self->{dir}/pgp/$self->{user}.$ext", $ring);
+	}
 }
 
 # Create a bare repo at git_path/$name.git with tags v1 and v2.
