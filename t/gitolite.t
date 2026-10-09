@@ -189,8 +189,15 @@ subtest environment => sub {
 		$run->({ $v => 'relative' }, qr/Missing or invalid $v/,
 		       "$v relative");
 	}
-	$run->({ GL_LIBDIR => "$e->{dir}/nope" },
-	       qr/Cannot load the gitolite libraries/, 'GL_LIBDIR without gitolite');
+	SKIP: {
+		# Distro packages (EPEL's gitolite3) also install the modules
+		# into perl's own @INC, where any GL_LIBDIR will find them
+		skip 'gitolite modules are in perl\'s @INC', 1
+			if spawn([ $^X, '-e', 'require Gitolite::Easy' ]);
+		$run->({ GL_LIBDIR => "$e->{dir}/nope" },
+		       qr/Cannot load the gitolite libraries/,
+		       'GL_LIBDIR without gitolite');
+	}
 	# The sig-note-to-kup cron job calls kup-server directly, without
 	# GL_BINDIR.  Gitolite::Rc puts that in front of PATH anyway, which
 	# taint mode refuses on the first exec, so a DIR alone proves nothing
