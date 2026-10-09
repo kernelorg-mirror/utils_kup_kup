@@ -227,7 +227,9 @@ subtest 'argument checks' => sub {
 };
 
 subtest protocol => sub {
-	is(server_ok($e, "INFO\n", 'INFO'), "kup-server 0.3.6\n",
+	my ($version) = (read_file("$KupTest::TOPDIR/kup-server") =~
+			 /^my \$VERSION = '([^']+)';$/m) or xbail('no $VERSION');
+	is(server_ok($e, "INFO\n", 'INFO'), "kup-server $version\n",
 	   'INFO prints the version');
 	server_ok($e, '', 'empty session');
 	server_ok($e, "\n  \n# a comment\nMKDIR /c1\n", 'blank and # lines');
