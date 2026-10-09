@@ -24,7 +24,12 @@ command="/usr/bin/kup-server",no-agent-forwarding,no-port-forwarding,no-pty,no-u
 .RE
 .PP
 Each user should have their own UID, as Unix user permissions are used
-for specific tree access control. On the client side, a corresponding
+for specific tree access control. Alternatively, all users can share one
+account managed by
+.BR gitolite ,
+which then decides who may do what; see
+.B GITOLITE
+below. On the client side, a corresponding
 client-side utility
 .BR kup
 is used to initiate the connection and perform the uploads.
@@ -72,6 +77,18 @@ A directory containing a GnuPG public keyring for each user, named
 <user>.gpg and readable (but not writable) by that user.
 .PP
 .TP
+\fB[auth]\fP
+How users are identified and what they may change. This section is
+optional.
+.TP
+\fBbackend\fP = \fIunix\fP
+Either \fIunix\fP (the default), where the user is the Unix account
+running
+.B kup-server
+and file permissions control access, or \fIgitolite\fP; see
+.BR GITOLITE .
+.PP
+.TP
 \fB[limits]\fP
 All sizes are in bytes, all times in seconds.
 .TP
@@ -115,6 +132,52 @@ compress_command = /bin/xz -9 -T0
 decompress_command = /bin/xz -cd
 .fi
 .RE
+.SH GITOLITE
+With \fBbackend\fP = \fIgitolite\fP,
+.B kup-server
+runs as a gitolite command. Enable it in the
+.B ENABLE
+list of ~/.gitolite.rc and install it as \fIkup-server\fP in a gitolite
+commands directory, such as \fILOCAL_CODE\fP/commands. Users then set
+\fBhost\fP = \fIgit@server\fP and \fBsubcmd\fP = \fIkup-server\fP in
+their ~/.kuprc.
+.PP
+The user name comes from \fBGL_USER\fP, so keyrings in \fBpgp_path\fP
+and per-user directories in \fBtmp_path\fP use gitolite user names. All
+paths in the config must be usable by the gitolite account, and
+\fBgit_path\fP is normally gitolite's repositories directory.
+.PP
+Access is controlled by rules for the fake repo \fI@kup-server\fP,
+using paths without the leading slash in place of branch names:
+.PP
+.RS
+.nf
+repo @kup-server
+    R    = @all
+    RW+C pub/people/USER/ = @all
+    RW   pub/tools/foo/ = alice
+.fi
+.RE
+.PP
+\fBW\fP lets the user put files (PUT, or LINK or MOVE to a path),
+\fB+\fP lets them remove files (DELETE, or MOVE from a path),
+\fBC\fP lets them create directories (MKDIR, or MOVE of a directory to
+a path) and \fBR\fP lets them list directories (DIR). As everywhere in
+gitolite, any \fBW\fP rule also gives \fBR\fP. \fBUSER\fP stands for
+the user's own name, matched literally. TAR and DIFF also need gitolite
+read access to the repo they use. The INFO command shows users their
+own rules.
+.PP
+gitolite only accepts ref names made of ASCII letters and digits, space,
+and the characters \fB- . _ @ / + : ,\fP. Paths with any other
+character, such as non-ASCII letters, \fB=\fP, \fB~\fP, \fB%\fP,
+\fB#\fP or brackets, match no rule and are always denied.
+.PP
+Only \fBGL_USER\fP, \fBGL_LIBDIR\fP, \fBGL_BINDIR\fP and
+\fBHOME\fP are taken from the environment. Programs that call
+.B kup-server
+directly instead of through gitolite must set \fBGL_USER\fP,
+\fBGL_LIBDIR\fP and \fBHOME\fP; \fBGL_BINDIR\fP is optional.
 .SH AUTHOR
 Written by H. Peter Anvin <hpa@zytor.com>.
 .SH COPYRIGHT

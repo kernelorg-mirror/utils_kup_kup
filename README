@@ -36,6 +36,11 @@ To run one test with verbose output:
 
   $ make check-one T=t/put.t
 
+The gitolite tests run when gitolite is installed, or when
+KUP_TEST_GITOLITE points to the src directory of a gitolite checkout:
+
+  $ make check KUP_TEST_GITOLITE=~/src/gitolite/src
+
 SUPPORT
 -------
 

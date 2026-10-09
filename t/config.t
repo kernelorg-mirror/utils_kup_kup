@@ -115,6 +115,27 @@ subtest paths => sub {
 	rename("$e->{cfg}.bak", $e->{cfg}) or xbail("rename: $!");
 };
 
+subtest 'auth backend' => sub {
+	# Anyone with a shell could set GL_USER, so only gitolite may trust it
+	my $mallory = $e->gen_key('mallory');
+	{
+		local $e->{user} = 'mallory';
+		$e->authorize($mallory);
+	}
+	my ($ok, $out, $err) = kup_server($e,
+		put_cmds($e, $mallory, "hi\n", '/t/as-mallory'),
+		{ -env => { GL_USER => 'mallory', GL_LIBDIR => '/nonexistent' } });
+	ok(!$ok && $err =~ /Signature invalid/,
+	   'unix backend ignores GL_USER') or diag("stderr: $err");
+	server_ok($e, put_cmds($e, $fpr, "hi\n", '/t/as-me'),
+		  'the Unix user still works with GL_USER set');
+
+	$e->set_cfg('auth.backend' => 'ldap');
+	server_fails($e, "DIR /\n", qr/Unknown auth backend: ldap/,
+		     'unknown backend');
+	$e->set_cfg('auth.backend' => undef);
+};
+
 subtest locking => sub {
 	# A child holds the tree lock for a while; the server must wait
 	open(my $lock, '<', "$dir/lock") or xbail("open lock: $!");

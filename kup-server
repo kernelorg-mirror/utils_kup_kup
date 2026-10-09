@@ -40,6 +40,8 @@
 #		- removes <old-path>
 # DIR path
 #		- lists the contents of <path> on stdout; must be a directory
+# INFO
+#		- prints the server version and, with gitolite, the user's rules
 # DONE
 #		- optional command, terminates transaction
 #
@@ -70,6 +72,12 @@ use Digest::SHA;
 
 my $VERSION = '0.3.6';
 
+# Only the gitolite backend may use these, and only after checking them.
+# Everything else goes: gitolite's own G3T_RC, for one, names a file that
+# Gitolite::Rc would execute.
+my %gl_env = map { $_ => $ENV{$_} } grep { defined($ENV{$_}) }
+	qw(HOME GL_USER GL_LIBDIR GL_BINDIR);
+
 # Scrub the environment completely
 %ENV = ('PATH' => '/bin:/usr/bin',
 		'LANG' => 'C',
@@ -92,18 +100,56 @@ sub my_username() {
 	my ($name,$passwd,$uid,$gid,$quota,$comment,$gcos,$dir,$shell,$expire) = getpwuid($whoami);
 
 	if (!defined($name) || $whoami != $uid) {
-		# We haven't called openlog() yet so we need to do it here
-		openlog("kup-server($whoami)", 'ndelay,pid', LOG_LOCAL5);
 		fatal("You don't exist, go away!");
 	}
 
 	return (defined($name) && $whoami == $uid) ? $name : $whoami;
 }
 
-my $user_name = my_username();
+# gitolite runs every user as the same Unix account and says who they
+# really are in GL_USER.  Load gitolite's access rules from its libraries
+# and return that user name.
+sub gitolite_username() {
+	# gitolite's USERNAME_PATT, minus groups.  The name also ends up in
+	# file names (keyring, per-user tmp dir), so it must not contain '/'.
+	my $user = $gl_env{'GL_USER'} // '';
+	if ($user !~ /^([0-9A-Za-z][-0-9A-Za-z._\@+]*)\z/) {
+		fatal("Missing or invalid GL_USER");
+	}
+	$ENV{'GL_USER'} = $1;
 
-openlog("kup-server($user_name)", 'ndelay,pid', LOG_LOCAL5);
+	foreach my $v ('HOME', 'GL_LIBDIR', 'GL_BINDIR') {
+		my $dir = $gl_env{$v};
+		# gitolite-shell sets GL_BINDIR, but sig-note-to-kup style
+		# callers don't, and gitolite only needs it to run commands
+		next if (!defined($dir) && $v eq 'GL_BINDIR');
+		if (!defined($dir) || $dir !~ m:^(/[^\0]*)\z:) {
+			fatal("Missing or invalid $v");
+		}
+		$ENV{$v} = $1;
+	}
 
+	unshift(@INC, $ENV{'GL_LIBDIR'});
+	# Gitolite::Common takes over die and warn for the whole program,
+	# which would prefix our errors with "FATAL:" and turn Git.pm's
+	# exception objects into strings that git_cmd_try can't catch
+	my %sig = map { $_ => $SIG{$_} } ('__DIE__', '__WARN__');
+	eval {
+		require Gitolite::Easy;
+		require Gitolite::Conf::Load;
+		1;
+	} or fatal("Cannot load the gitolite libraries");
+	@SIG{keys %sig} = values %sig;
+	# Gitolite::Rc puts GL_BINDIR in front of PATH.  Without one that is
+	# an empty entry, which taint mode refuses on the first exec, and the
+	# programs we run are all in /bin or /usr/bin anyway
+	$ENV{'PATH'} = '/bin:/usr/bin';
+
+	return $ENV{'GL_USER'};
+}
+
+# Until we know who the user is
+openlog("kup-server", 'ndelay,pid', LOG_LOCAL5);
 
 # Get config values from kup-server.cfg
 my $cfg_file = '/etc/kup/kup-server.cfg';
@@ -113,6 +159,22 @@ my $cfg = new Config::Simple($cfg_file);
 if (!defined($cfg)) {
 	fatal('Error reading config file: '.$cfg_file);
 }
+
+# unix: one Unix account per uploader, access control by file permissions
+# gitolite: one shared account, access control by gitolite rules
+my $auth_backend = $cfg->param('auth.backend') // 'unix';
+my $user_name;
+
+if ($auth_backend eq 'unix') {
+	$user_name = my_username();
+} elsif ($auth_backend eq 'gitolite') {
+	$user_name = gitolite_username();
+} else {
+	fatal("Unknown auth backend: $auth_backend");
+}
+
+closelog();
+openlog("kup-server($user_name)", 'ndelay,pid', LOG_LOCAL5);
 
 my $data_path = $cfg->param('paths.data_path');
 my $git_path  = $cfg->param('paths.git_path');
@@ -371,6 +433,68 @@ sub is_valid_filename($)
 	return 1;
 }
 
+# Fail unless the user may do $op on $path, which must already be valid.
+#
+# gitolite rules are written for the fake repo "@kup-server", using the
+# path without its leading slash as the ref name:
+#
+#     repo @kup-server
+#         R    = @all
+#         RW+C pub/people/USER/ = @all
+#
+# W puts files (PUT, and LINK or MOVE to a path), + removes them (DELETE,
+# MOVE from a path), C makes directories (MKDIR, and MOVE of a directory
+# to a path), R lists them (DIR).  As everywhere in gitolite, any W rule
+# implies R.
+# "read" is about a git tree under git_path, which must be readable as
+# a gitolite repo of the same name.
+my %gitolite_perm = ('put' => 'W', 'delete' => '+', 'mkdir' => 'C');
+
+# Can the user get $perm on $ref of "@kup-server"?
+sub gitolite_can($$)
+{
+	my($perm, $ref) = @_;
+
+	# On success, gitolite returns the rule that matched
+	my $refex = Gitolite::Conf::Load::access('@kup-server', $user_name,
+						 $perm, $ref);
+	return 0 if ($refex =~ /DENIED/);
+
+	# gitolite puts the user name into "USER" rules as a regex, so the
+	# rule for "a.b" also matches the directory "aXb"
+	my $name = quotemeta($user_name);
+	$refex =~ s:/\Q$user_name\E/:/$name/:g;
+	return ($ref =~ /^$refex/);
+}
+
+sub authorize($$)
+{
+	my($op, $path) = @_;
+
+	return if ($auth_backend ne 'gitolite');
+
+	my $ok = 0;
+	# gitolite dies on names that kup allows but it doesn't (non-ASCII,
+	# brackets, ...); those are simply not covered by any rule
+	eval {
+		if ($op eq 'read') {
+			my($repo) = ($path =~ m:^/(.*?)(\.git)?$:);
+			$ok = Gitolite::Easy::can_read($repo);
+		} elsif ($op eq 'list') {
+			$ok = Gitolite::Easy::can_read('@kup-server');
+		} else {
+			my $ref = 'refs/heads'.$path;
+			# Rules for a directory end in a slash, which "MKDIR /foo"
+			# or "DELETE /foo" for that directory itself never match
+			$ok = gitolite_can($gitolite_perm{$op}, $ref) ||
+				  gitolite_can($gitolite_perm{$op}, $ref.'/');
+		}
+		1;
+	} or syslog(LOG_WARNING, "gitolite: %s", $@ =~ s/\s+$//r);
+
+	fatal("Permission denied: $op $path") if (!$ok);
+}
+
 # Return a percentage, valid even if the denominator is zero
 sub percentage($$)
 {
@@ -525,6 +649,8 @@ sub get_tar_data(@)
 	if (!is_valid_filename($tree)) {
 		fatal("Invalid pathname in TAR command");
 	}
+	# Before looking at the disk, so it doesn't tell which repos exist
+	authorize('read', $tree);
 
 	if (!is_clean_string($prefix)) {
 		fatal("Invalid prefix string");
@@ -568,6 +694,7 @@ sub get_diff_data(@)
 	if (!is_valid_filename($tree)) {
 		fatal("Invalid pathname in DIFF command");
 	}
+	authorize('read', $tree);
 
 	if ($tree !~ /\.git$/ || ! -d $git_path.$tree ||
 		! -d $git_path.$tree.'/objects') {
@@ -838,6 +965,7 @@ sub put_file(@)
 	if (!is_valid_filename($file)) {
 		fatal("Invalid filename in PUT command");
 	}
+	authorize('put', $file);
 
 	my @install_ext;
 	my @conflic_ext;
@@ -916,6 +1044,7 @@ sub do_mkdir(@)
 	if (!is_valid_filename($file)) {
 		fatal("Invalid filename in MKDIR command");
 	}
+	authorize('mkdir', $file);
 
 	my @badext = ('.sign', keys(%zformats));
 
@@ -990,6 +1119,8 @@ sub move_or_link_file($@)
 	if (!is_valid_filename($from) || !is_valid_filename($to)) {
 		fatal("Invalid filename in $cmd command");
 	}
+	authorize('delete', $from) if ($cmd eq 'MOVE');
+	authorize('put', $to);
 
 	if ($from =~ /\.gz$/) {
 		if ($to !~ /\.gz$/) {
@@ -1015,6 +1146,10 @@ sub move_or_link_file($@)
 		if ($cmd ne 'MOVE') {
 			fatal("Cannot $cmd a directory");
 		}
+		# Otherwise a directory made where C is allowed could be moved
+		# to where it isn't.  Checked under the lock, so $from can't
+		# turn into a directory after the check.
+		authorize('mkdir', $to);
 
 		if (-e $data_path.$to) {
 			fatal("Directory MOVE destination busy");
@@ -1092,6 +1227,7 @@ sub delete_path(@)
 	if (!is_valid_filename($file)) {
 		fatal("Invalid pathname in DELETE command");
 	}
+	authorize('delete', $file);
 
 	if ($file !~ /\.gz$/ &&
 		has_extension($file, '.sign', keys(%zformats))) {
@@ -1228,6 +1364,7 @@ sub do_dir(@)
 		fatal("Invalid pathname in DIR command");
 	}
 	$dir .= '/';
+	authorize('list', $dir);
 
 	my $dh;
 	if (!opendir($dh, $data_path.$dir)) {
@@ -1262,6 +1399,27 @@ sub do_dir(@)
 sub do_info()
 {
 	print "kup-server $VERSION\n";
+
+	return if ($auth_backend ne 'gitolite');
+
+	# Show the user's rules for "@kup-server" in kup terms
+	my %xlat = (
+		'R'    => 'ls',
+		'RW'   => 'put',
+		'RW+'  => 'put/rm/mv',
+		'RWC'  => 'put/mkdir',
+		'RW+C' => 'put/rm/mv/mkdir',
+		'-'    => '(denied)',
+	);
+	print "\n";
+	Gitolite::Conf::Load::load('@kup-server');
+	foreach my $r (Gitolite::Conf::Load::rules('@kup-server', $user_name)) {
+		my(undef, $perm, $ref) = @$r;
+		$ref =~ s:^refs/heads/::;
+		$ref =~ s:/USER/:/$user_name/:;
+		$ref = ($ref eq 'refs/.*') ? '/*' : '/'.$ref.'*';
+		printf "%-24s %s\n", ($xlat{$perm} // $perm), $ref;
+	}
 }
 
 sub get_command()
