@@ -44,48 +44,56 @@ cat batchfile | ssh -a -x -k -T [user@]host
 .RE
 .RE
 .TP
-\fB\-e\fP, \fB\-\-rsh, \fB\-\-ssh\fP \fIcommand\fP
-Override the default command used to connect to the server.  The
-default is set by the environment variable
+\fB\-e\fP, \fB\-\-rsh\fP, \fB\-\-ssh\fP \fIcommand\fP
+Override the command used to connect to the server, which is otherwise
+set by the environment variable
 .B KUP_RSH
-or if that is not set,
+or the \fBrsh\fP setting in the config file, or if neither is set,
 \fIssh \-a \-x \-k \-T\fP.
 .TP
-\fB\-H\fP, \fB\-\-host\fP \fI[user@]host\fP
-Override the default user and host to which to connect.  The default
-is set by the environment variable
+\fB\-o\fP, \fB\-\-host\fP \fI[user@]host\fP
+Set the user and host to which to connect, overriding the environment
+variable
 .B KUP_HOST
-or if that is not set,
-\fIkup.kernel.org\fP.
+and the \fBhost\fP setting in the config file. There is no default:
+.B kup
+fails if no host is set in any of these places.
 .TP
 \fB\-c\fP, \fB\-\-subcmd\fP \fIsubcommand\fP
 After establishing the ssh connection, issue a subcommand in case the remote
 server is used in conjunction with an AuthZ tool like gitolite. Can also be set
 using the env variable
 .B KUP_SUBCMD
-or if not set, no subcommand will be used (default kup-server behavior).
+or the \fBsubcmd\fP setting in the config file. If neither is set, no
+subcommand is used (default kup-server behavior).
+.TP
+\fB\-v\fP, \fB\-\-verbose\fP
+Print each command to standard error as it is sent.
+.TP
+\fB\-h\fP, \fB\-\-help\fP
+Print a short usage summary and exit.
 .SH COMMANDS
 A series of commands can be specified on a single command line,
 separated by a double dash argument (\fB\-\-\fP).
 .PP
 In all cases, PGP signatures are detached signature files
 corresponding to the \fIuncompressed\fP content.  If a
-\fIremote_path\fP ends in \fP\.gz\fP then
-.BR gzip ,
-.B bzip2
+\fIremote_path\fP ends in \fB.gz\fP, the server stores the content
+compressed in every format it is configured for (for example
+.B gzip
 and
-.B xz
-compressed files are generated on the server; otherwise the content is
-stored uncompressed.
+.BR xz );
+otherwise the content is stored uncompressed.
 .TP
 \fBput\fP \fIlocal_file\fP \fPsignature_file\fP \fIremote_path\fP
 Upload the file \fIlocal_file\fP signed with
-\fIsignature_file\fP.  \fIlocal_file\fP can be compressed with
-.BR gzip ,
-.B bzip2
+\fIsignature_file\fP.  \fIlocal_file\fP can be compressed in any format
+the server is configured for (for example
+.B gzip
 or
-.BR xz ;
-this may reduce upload time.  The content will be stored compressed or
+.BR xz );
+this may reduce upload time.  The format is taken from the extension of
+\fIlocal_file\fP.  The content will be stored compressed or
 uncompressed depending solely on the extension of \fIremote_path\fP.
 .TP
 \fBput\fP \fB\-\-tar\fP [\fB\-\-prefix\fP=] \fIremote_tree\fP \fIref\fP \fPsignature_file\fP \fIremote_path\fP
@@ -131,6 +139,12 @@ compression formats are deleted together.
 .TP
 \fBls|dir\fP \fIpath...\fP
 Lists back the contents of one or more directories on the server.
+.TP
+\fBinfo\fP
+Print the version of
+.B kup-server
+and any other information the server provides, such as the paths the
+user may change when the server uses gitolite.
 .SH PATHNAME HANDLING
 Remote (server) pathnames all need to be absolute paths, starting with
 a slash (/).  The sole exception is \fInew_path\fP for the \fBmv\fP
@@ -145,21 +159,25 @@ final (filename) component of \fIlocal_file\fP will be appended to the
 final pathname.
 .SH CONFIG FILE
 Kup checks the presence of $HOME/.kuprc and can load the
-.B host
-and
+.BR host ,
 .B rsh
-parameters from the config file. The environment variables
-.B KUP_HOST
 and
+.B subcmd
+parameters from the config file. The environment variables
+.BR KUP_HOST ,
 .B KUP_RSH
-will override the values set in this config file.
+and
+.B KUP_SUBCMD
+override the values set in this config file, and the command line
+options override both.
 .PP
-SAMPLE $HOME/.kuprc:
+SAMPLE $HOME/.kuprc for kernel.org:
 .PP
 .RS
 .nf
-host = user@kup.kernel.org
-rsh  = /usr/bin/ssh -a -x -k -T
+host   = git@gitolite.kernel.org
+subcmd = kup-server
+rsh    = /usr/bin/ssh -a -x -k -T
 .fi
 .RE
 .SH EXIT STATUS
@@ -179,14 +197,16 @@ status, and in that case nothing is sent to the server. With
 .BR \-\-batch ,
 status 0 means the command stream was written out successfully.
 .SH EXAMPLES
-Generate a tarball locally, sign it, compress it, and upload it into /pub/foolib on the server:
+Generate a tarball locally, sign it, compress it, and upload it into
+/pub/foolib on the server, which stores it in every compressed format it
+is configured for:
 .PP
 .RS
 .nf
 git archive --format=tar --prefix=foolib-1.0/ -o foolib-1.0.tar v1.0
 gpg --detach-sign --armor foolib-1.0.tar
-bzip2 -9 foolib-1.0.tar
-kup put foolib-1.0.tar.bz2 foolib-1.0.tar.asc /pub/foolib/foolib-1.0.tar.bz2
+xz -9 foolib-1.0.tar
+kup put foolib-1.0.tar.xz foolib-1.0.tar.asc /pub/foolib/foolib-1.0.tar.gz
 .fi
 .RE
 .PP
@@ -213,6 +233,7 @@ or (at your option) any later version; incorporated herein by
 reference.  There is NO warranty; not even for MERCHANTABILITY or
 FITNESS FOR A PARTICULAR PURPOSE.
 .SH "SEE ALSO"
+.BR kup-server (1),
 .BR git (1),
 .BR ssh (1),
 .BR gzip (1),
