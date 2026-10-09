@@ -87,6 +87,11 @@ running
 .B kup-server
 and file permissions control access, or \fIgitolite\fP; see
 .BR GITOLITE .
+With \fIunix\fP,
+.B kup-server
+refuses to run when \fBGL_USER\fP is set. This catches a gitolite
+setup with this line missing, where all users would share one Unix
+account and nothing would control their access.
 .PP
 .TP
 \fB[limits]\fP

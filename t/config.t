@@ -116,19 +116,16 @@ subtest paths => sub {
 };
 
 subtest 'auth backend' => sub {
-	# Anyone with a shell could set GL_USER, so only gitolite may trust it
-	my $mallory = $e->gen_key('mallory');
-	{
-		local $e->{user} = 'mallory';
-		$e->authorize($mallory);
+	# Under gitolite everyone is the same Unix user, so the unix backend
+	# there would mean no access control at all
+	for my $gl_user ('mallory', '') {
+		my ($ok, $out, $err) = kup_server($e, "MKDIR /t/gl\n",
+			{ -env => { GL_USER => $gl_user } });
+		ok(!$ok && $err =~ /GL_USER is set, but the auth backend is not gitolite/,
+		   "unix backend refuses GL_USER='$gl_user'") or diag("stderr: $err");
 	}
-	my ($ok, $out, $err) = kup_server($e,
-		put_cmds($e, $mallory, "hi\n", '/t/as-mallory'),
-		{ -env => { GL_USER => 'mallory', GL_LIBDIR => '/nonexistent' } });
-	ok(!$ok && $err =~ /Signature invalid/,
-	   'unix backend ignores GL_USER') or diag("stderr: $err");
-	server_ok($e, put_cmds($e, $fpr, "hi\n", '/t/as-me'),
-		  'the Unix user still works with GL_USER set');
+	ok(!-e "$data/t/gl", '... before doing anything');
+	server_ok($e, "MKDIR /t/gl\n", 'and works without it');
 
 	$e->set_cfg('auth.backend' => 'ldap');
 	server_fails($e, "DIR /\n", qr/Unknown auth backend: ldap/,

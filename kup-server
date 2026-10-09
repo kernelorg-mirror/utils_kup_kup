@@ -166,6 +166,11 @@ my $auth_backend = $cfg->param('auth.backend') // 'unix';
 my $user_name;
 
 if ($auth_backend eq 'unix') {
+	# gitolite runs everyone as one Unix user, so a gitolite setup that
+	# lost its [auth] line would let any user change anything
+	if (defined($gl_env{'GL_USER'})) {
+		fatal("GL_USER is set, but the auth backend is not gitolite");
+	}
 	$user_name = my_username();
 } elsif ($auth_backend eq 'gitolite') {
 	$user_name = gitolite_username();
