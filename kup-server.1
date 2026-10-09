@@ -114,8 +114,10 @@ logged.
 \fBgpgv\fP = \fI/usr/bin/gpgv\fP, \fBsq\fP = \fI/usr/bin/sq\fP
 Absolute paths of the programs.
 .PP
-The fingerprint of the key behind every good signature is logged, and
-so is the reason for every rejected one.
+Both verifiers reject signatures from keys that are revoked or expired
+in the user's keyring now, whatever time the signature claims to have
+been made. The fingerprint of the key behind every good signature is
+logged, and so is the reason for every rejected one.
 .PP
 .TP
 \fB[limits]\fP

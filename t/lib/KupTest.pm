@@ -416,14 +416,17 @@ sub gpg {
 		       { GNUPGHOME => $self->{gpg_home} }, $opt);
 }
 
-# Generate a signing key and return its fingerprint
+# Generate a signing key and return its fingerprint.  $expire is gpg's
+# expiry ("never" if undef); $when, like "20200101T000000", makes the key
+# as if it were that time (gpg's --faked-system-time).
 sub gen_key {
-	my ($self, $name) = @_;
+	my ($self, $name, $expire, $when) = @_;
 	KupTest::require_cmd('gpg');
 	my $uid = "$name <$name\@example.org>";
 	my $err;
-	$self->gpg([ '--quick-generate-key', $uid, 'ed25519', 'sign',
-		     'never' ], { 2 => \$err })
+	$self->gpg([ (defined($when) ? ('--faked-system-time', "$when!") : ()),
+		     '--quick-generate-key', $uid, 'ed25519', 'sign',
+		     $expire // 'never' ], { 2 => \$err })
 		or KupTest::xbail("gpg key generation failed: $err");
 	my $out;
 	$self->gpg([ '--with-colons', '--list-keys', "=$uid" ],

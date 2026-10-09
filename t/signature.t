@@ -90,16 +90,74 @@ sub check_verifier {
 	(my $rev = read_file("$e->{gpg_home}/openpgp-revocs.d/$rv.rev"))
 		=~ s/^:(-----BEGIN)/$1/m;
 	$e->gpg([ '--import' ], { 0 => $rev }) or xbail('revocation failed');
-	$e->authorize($rv);		# last case: alice's ring isn't needed any more
-	{
-		local $TODO = 'gpgv only says REVKEYSIG and exits 0'
-			if $verifier eq 'gpgv';
-		my ($ok, $out, $err) = kup_server($e, blob(DATA => $payload).
-			blob(SIGN => $rv_sig)."PUT /t/revoked\n");
-		ok(!$ok && $err =~ /Signature invalid/, 'revoked key rejected')
-			or diag("stderr: $err");
-	}
+	$e->authorize($rv);		# alice's ring isn't needed any more
+	server_fails($e, blob(DATA => $payload).blob(SIGN => $rv_sig).
+			 "PUT /t/revoked\n", qr/Signature invalid/,
+		     'revoked key rejected');
+	like($e->syslog_take, qr/^notice: pgp: $verifier rejected the signature: .*revoked/m,
+	     '... and why is logged');
 	unlink(glob("$data/t/revoked*"));
+
+	# Expired keys: the server's ring decides, not the signer.  The keys
+	# are made in 2020 and expired a day later.
+	my $past = '20200101T000000';
+	my $backdated = sub {	# signed while the key was still live
+		my ($fpr) = @_;
+		blob(DATA => $payload).
+			blob(SIGN => sign_blob($e, $fpr, $payload, '--detach-sign',
+				'--faked-system-time', '20200101T060000!'));
+	};
+	my $expired = sub {
+		my ($stream, $msg) = @_;
+		server_fails($e, $stream."PUT /t/expired\n", qr/Signature invalid/,
+			     $msg);
+		like($e->syslog_take,
+		     qr/^notice: pgp: $verifier rejected the signature: .*[Ee]xpired/m,
+		     '... and why is logged');
+	};
+
+	my $ex = $e->gen_key('expired', '1d', $past);
+	$e->authorize($ex);
+	# Its owner extended it, but never sent the new expiry to the server
+	$e->gpg([ '--quick-set-expire', $ex, 'never' ])
+		or xbail('cannot extend the key');
+	$expired->(blob(DATA => $payload).
+		   blob(SIGN => sign_blob($e, $ex, $payload)),
+		   'key expired in the ring, extended by its owner');
+	# The signer picks the signature's time; sq only checks that the key
+	# was live then
+	$expired->($backdated->($ex), 'backdated signature by an expired key');
+
+	# The same with signing subkeys, which is what most people sign with
+	my $sub = $e->gen_key('subkey', 'never', $past);
+	my $signing_subkeys = sub {	# oldest first
+		my ($out, @fpr, $signing);
+		$e->gpg([ '--with-colons', '--list-keys', $sub ], { 1 => \$out });
+		for (split(/\n/, $out)) {
+			my @f = split(/:/);
+			$signing = ($f[0] eq 'sub' && $f[11] =~ /s/) if $f[0] =~ /\A(?:pub|sub)\z/;
+			push(@fpr, $f[9]) if $f[0] eq 'fpr' && $signing;
+		}
+		@fpr;
+	};
+	$e->gpg([ '--faked-system-time', "$past!", '--quick-add-key', $sub,
+		  'ed25519', 'sign', '1d' ]) or xbail('cannot add a subkey');
+	my ($old_sub) = $signing_subkeys->();
+	$e->authorize($sub);
+	# "!": sign with exactly this subkey
+	$expired->($backdated->("$old_sub!"),
+		   'backdated signature by an expired subkey');
+
+	$e->gpg([ '--quick-add-key', $sub, 'ed25519', 'sign', 'never' ])
+		or xbail('cannot add a subkey');
+	my (undef, $new_sub) = $signing_subkeys->();
+	$e->authorize($sub);
+	server_ok($e, blob(DATA => $payload).
+		  blob(SIGN => sign_blob($e, "$new_sub!", $payload))."PUT /t/subkey\n",
+		  'a live signing subkey works');
+	like($e->syslog_take, qr/^notice: pgp: signed by $sub$/m,
+	     '... and the primary key is logged as the signer');
+	unlink(glob("$data/t/subkey*"));
 
 	my @left = grep { !m{/t/good2?(\.sign)?\z} } glob("$data/t/*");
 	is_deeply(\@left, [], 'only the good uploads were installed');
