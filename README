@@ -20,6 +20,22 @@ them, then your distro likely has the "cpan" tool to install them :
 
   $ sudo cpan install Config::Simple Encode File::Spec
 
+TESTING
+-------
+
+Run the test suite with:
+
+  $ make check
+
+The tests need gpg, git, gzip and xz in addition to the dependencies
+above. Each test builds a throwaway server tree, keyrings and git repo
+in a temporary directory, so nothing outside of it is touched. Note
+that kup-server still logs to syslog while the tests run.
+
+To run one test with verbose output:
+
+  $ make check-one T=t/put.t
+
 SUPPORT
 -------
 Kup is on github: https://github.com/mricon/kup
