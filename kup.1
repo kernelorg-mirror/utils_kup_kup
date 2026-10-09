@@ -162,6 +162,22 @@ host = user@kup.kernel.org
 rsh  = /usr/bin/ssh -a -x -k -T
 .fi
 .RE
+.SH EXIT STATUS
+.B kup
+exits with status 0 only if every command was accepted by the server.
+If a command fails on the server, the server stops processing any
+further commands, and
+.B kup
+exits with the non-zero exit status of the
+.B rsh
+command (for example, 255 if ssh cannot connect). If the
+.B rsh
+command is killed by a signal, the exit status is 1. Errors that
+.B kup
+finds itself, such as invalid pathnames, also give a non-zero exit
+status, and in that case nothing is sent to the server. With
+.BR \-\-batch ,
+status 0 means the command stream was written out successfully.
 .SH EXAMPLES
 Generate a tarball locally, sign it, compress it, and upload it into /pub/foolib on the server:
 .PP

@@ -10,6 +10,8 @@ require_mods(qw(Config::Simple BSD::Resource Git));
 
 my $e = kup_env();
 my $dir = $e->{dir};
+my $fpr = $e->gen_key('alice');
+$e->authorize($fpr);
 write_file("$dir/a.txt", "abcd\n");
 write_file("$dir/a.txt.sign", "SIG\n");
 write_file("$dir/r.tar.xz", "XZDATA");
@@ -227,8 +229,6 @@ subtest 'aliases and encoding' => sub {
 };
 
 subtest 'end to end over a fake ssh' => sub {
-	my $fpr = $e->gen_key('alice');
-	$e->authorize($fpr);
 	write_file("$dir/a.txt.sign", sign_blob($e, $fpr, "abcd\n"));
 	# Stands in for ssh: records its arguments, then runs the server
 	my $rsh = "$dir/fake-ssh";
@@ -246,15 +246,54 @@ subtest 'end to end over a fake ssh' => sub {
 	like($out, qr/^\+\+\+ \/pub\/\n.* a\.txt\n.* a\.txt\.sign\n\n\z/sm,
 	     'ls output came back');
 
-	# Release scripts do "kup put ... && announce", so failures must
-	# show up in the exit status
-	local $TODO = 'close_output() ignores the rsh exit status';
+};
+
+# Release scripts do "kup put ... && announce", so every failure must
+# show up in the exit status
+subtest 'exit status' => sub {
+	my $rsh = "$dir/fake-ssh";
 	write_file("$dir/bad.sign", sign_blob($e, $fpr, "not abcd\n"));
-	($ok, undef, $err) = kup_client($e, { KUP_RSH => $rsh },
-					qw(put a.txt bad.sign /pub/bad));
-	ok(!$ok, 'server-side failure makes kup fail') or diag($err);
+	my ($ok, undef, $err) = kup_client($e, { KUP_RSH => $rsh },
+					   qw(put a.txt bad.sign /pub/bad));
+	ok(!$ok, 'server-side failure makes kup fail');
+	# kup-server's status is whatever errno die() finds, so don't pin it
+	like($err,
+	     qr/^Signature invalid\n.*rsh command failed with exit status [1-9]/ms,
+	     "server's reason is shown, then kup's");
+
+	# The first two fakes read their input before failing; the third
+	# exits at once, so kup is still writing when the pipe breaks
+	my %fake = (exit42 => 'cat >/dev/null; exit 42',
+		    killed => 'cat >/dev/null; kill -TERM $$',
+		    early => 'exit 7');
+	while (my ($name, $code) = each %fake) {
+		write_file("$dir/$name", "#!/bin/sh\n$code\n");
+		chmod(0755, "$dir/$name");
+	}
+	($ok, undef, $err) = kup_client($e, { KUP_RSH => "$dir/exit42" },
+					'info');
+	ok(!$ok && $? >> 8 == 42, 'rsh exit status is passed on');
+	($ok, undef, $err) = kup_client($e, { KUP_RSH => "$dir/killed" },
+					'info');
+	ok(!$ok && $? >> 8 == 1 && $err =~ /killed by signal 15/,
+	   'rsh killed by a signal');
+	write_file("$dir/big.bin", 'x' x (1024 * 1024));	# > pipe buffer
+	($ok, undef, $err) = kup_client($e, { KUP_RSH => "$dir/early" },
+					qw(put big.bin a.txt.sign /pub/big));
+	ok(!$ok && $? >> 8 == 7 && $err =~ /exit status 7/,
+	   'rsh that dies mid-stream is reported, not SIGPIPE') or diag($err);
 	($ok) = kup_client($e, { KUP_RSH => "$dir/no-such-ssh" }, 'info');
 	ok(!$ok, 'missing rsh command makes kup fail');
+
+	SKIP: {
+		skip('/dev/full missing', 1) if !-w '/dev/full';
+		$ok = spawn([ 'sh', '-c', 'exec "$@" >/dev/full', 'sh',
+			      perl_cmd(), "$KupTest::TOPDIR/kup", '-b', 'info' ],
+			    { HOME => $e->{home}, KUP_HOST => 'h' },
+			    { 2 => \$err });
+		ok(!$ok && $err =~ /error writing output: No space left/,
+		   'batch output write error') or diag($err);
+	}
 };
 
 done_testing;

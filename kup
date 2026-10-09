@@ -20,6 +20,7 @@ use warnings;
 use bytes;
 use Encode qw(encode decode);
 use File::Spec;
+use IO::Handle;
 use Config::Simple;
 
 my $blksiz = 1024*1024;
@@ -269,6 +270,11 @@ sub url_encode($)
 # Configure the output stream
 sub setup_output()
 {
+	# If the other end goes away mid-stream, we want a failed print and
+	# then the rsh exit status from close_output(), not a silent death
+	# by SIGPIPE
+	$SIG{PIPE} = 'IGNORE';
+
 	# In batch mode, we dump the output to stdout so the user can
 	# aggregate it best they wish
 	unless ($opt{'batch'}) {
@@ -293,13 +299,34 @@ sub setup_output()
 	binmode(STDOUT);
 }
 
-# Terminate the output process
+# Terminate the output process.  For an rsh pipe, close() waits for the
+# rsh to exit, and its exit status is the only way a failure on the
+# server side (bad signature, conflict, lost connection) reaches us.
 sub close_output()
 {
-	$| = 1;						# Flush STDOUT
-	unless ($opt{'batch'}) {
-		close(STDOUT);
+	# Flush before close(): if close() has to flush and that fails,
+	# perl's pclose returns -1 instead of the rsh exit status
+	my $flushed = STDOUT->flush;
+	my $errno = $!;
+	my $closed = close(STDOUT);
+	return if $flushed && $closed;
+	$errno = $! if $flushed;
+
+	# A dead rsh also makes the flush fail, but its exit status says
+	# more than "Broken pipe" does
+	my $status = $?;
+	if (!$opt{'batch'} && $status) {
+		if ($status & 127) {
+			print STDERR "$0: rsh command killed by signal ",
+				$status & 127, "\n";
+			exit 1;
+		}
+		# Pass it on, so e.g. ssh's 255 for connection errors survives
+		print STDERR "$0: rsh command failed with exit status ",
+			$status >> 8, "\n";
+		exit($status >> 8);
 	}
+	die "$0: error writing output: $errno\n";
 }
 
 # Print a command to STDOUT, and if requested, to STDERR
